@@ -1,0 +1,1413 @@
+import React, { useState, useEffect, useRef } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { Helmet } from "react-helmet";
+import { format, addDays, startOfWeek, endOfWeek, isSameDay } from "date-fns";
+import { toast } from "@/hooks/use-toast";
+import { apiRequest } from "@/lib/queryClient";
+import { useAuth } from "@/hooks/useAuth";
+import { cn, getMealTypes, getTimeOfDay, calculateTotalNutrition } from "@/lib/utils";
+import { useLocation, Link } from "wouter";
+import { DndProvider, useDrag, useDrop } from "react-dnd";
+import { HTML5Backend } from "react-dnd-html5-backend";
+import { motion, AnimatePresence } from "framer-motion";
+import { Pie } from "react-chartjs-2";
+import { 
+  Chart as ChartJS, 
+  ArcElement, 
+  Tooltip, 
+  Legend,
+  CategoryScale,
+  LinearScale 
+} from 'chart.js';
+
+// Register Chart.js components
+ChartJS.register(ArcElement, Tooltip, Legend, CategoryScale, LinearScale);
+
+// UI Components
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { Progress } from "@/components/ui/progress";
+import { Badge } from "@/components/ui/badge";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+  DialogTrigger,
+} from "@/components/ui/dialog";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+  SheetTrigger,
+  SheetFooter,
+  SheetClose,
+} from "@/components/ui/sheet";
+import {
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+} from "@/components/ui/tabs";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+
+// Icons
+import {
+  Calendar,
+  CalendarPlus,
+  ChevronLeft,
+  ChevronRight,
+  Clock,
+  Coffee,
+  Edit,
+  Flame,
+  GripVertical,
+  ListChecks,
+  Loader,
+  MessageSquare,
+  Plus,
+  RefreshCw,
+  Save,
+  Search,
+  Settings,
+  ShoppingCart,
+  Trash,
+  Utensils,
+  X,
+} from "lucide-react";
+
+// DnD Types
+const ItemTypes = {
+  MEAL: 'meal',
+  RECIPE: 'recipe'
+};
+
+// Recipe Item Component 
+const RecipeItem = ({ recipe, onClick }: { recipe: any, onClick: () => void }) => {
+  const [{ isDragging }, drag] = useDrag(() => ({
+    type: ItemTypes.RECIPE,
+    item: { recipe },
+    collect: (monitor) => ({
+      isDragging: !!monitor.isDragging(),
+    }),
+  }));
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.3 }}
+      ref={drag}
+      onClick={onClick}
+      style={{ opacity: isDragging ? 0.5 : 1 }}
+      className="p-3 border rounded-lg cursor-pointer transform hover:translate-y-[-2px] transition-all hover:shadow-md bg-white dark:bg-gray-800"
+    >
+      {recipe.imageUrl && (
+        <div className="w-full h-36 mb-2 overflow-hidden rounded-md bg-gray-100 dark:bg-gray-700">
+          <img 
+            src={recipe.imageUrl} 
+            alt={recipe.title || recipe.name} 
+            className="w-full h-full object-cover"
+            onError={(e) => {
+              e.currentTarget.src = 'https://placehold.co/600x400/e2e8f0/64748b?text=Recipe';
+            }}
+          />
+        </div>
+      )}
+      <div className="flex justify-between items-start">
+        <div>
+          <h3 className="font-medium">{recipe.title || recipe.name}</h3>
+          {(recipe.description || recipe.instructions) && (
+            <p className="text-sm text-gray-600 dark:text-gray-400 truncate">
+              {(recipe.description || recipe.instructions).substring(0, 60)}
+              {(recipe.description || recipe.instructions).length > 60 ? '...' : ''}
+            </p>
+          )}
+        </div>
+        {recipe.calories && (
+          <Badge variant="outline" className="bg-orange-100 text-orange-800 border-orange-200">
+            {recipe.calories} kcal
+          </Badge>
+        )}
+      </div>
+      
+      <div className="flex gap-2 mt-2">
+        {recipe.protein && (
+          <Badge variant="secondary" className="text-xs">
+            P: {recipe.protein}g
+          </Badge>
+        )}
+        {recipe.carbs && (
+          <Badge variant="secondary" className="text-xs">
+            C: {recipe.carbs}g
+          </Badge>
+        )}
+        {recipe.fat && (
+          <Badge variant="secondary" className="text-xs">
+            F: {recipe.fat}g
+          </Badge>
+        )}
+      </div>
+    </motion.div>
+  );
+};
+
+// Meal Slot Component
+// Draggable Meal Component
+const MealItem = ({ 
+  meal, 
+  onRemove 
+}: { 
+  meal: any; 
+  onRemove: (id: number) => void 
+}) => {
+  const [{ isDragging }, drag, dragPreview] = useDrag(() => ({
+    type: ItemTypes.MEAL,
+    item: { meal },
+    collect: (monitor) => ({
+      isDragging: !!monitor.isDragging(),
+    }),
+  }));
+
+  // Get proper meal name
+  const getMealName = () => {
+    if (meal.name && meal.name !== '') {
+      return meal.name;
+    } else if (meal.recipeId) {
+      // Try to fetch recipe information from cached recipes if available
+      return `Recipe #${meal.recipeId}`;
+    } else {
+      return "Unnamed Meal";
+    }
+  };
+
+  return (
+    <motion.div
+      ref={dragPreview}
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      className={`bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded p-2 text-sm relative group ${isDragging ? 'opacity-50' : 'opacity-100'}`}
+    >
+      <div className="flex items-center">
+        <div ref={drag} className="cursor-move">
+          <GripVertical className="h-3 w-3 text-gray-400 mr-1" />
+        </div>
+        <div className="flex-1">
+          <div className="font-medium">{getMealName()}</div>
+          {meal.calories && (
+            <div className="text-xs text-orange-500">{meal.calories} kcal</div>
+          )}
+        </div>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-6 w-6 p-0 opacity-0 group-hover:opacity-100 text-red-500 hover:text-red-600"
+          onClick={() => onRemove(meal.id)}
+        >
+          <X className="h-3 w-3" />
+        </Button>
+      </div>
+    </motion.div>
+  );
+};
+
+// Meal Slot Component
+const MealSlot = ({ 
+  day, 
+  mealType, 
+  meals, 
+  onAddMeal, 
+  onRemoveMeal
+}: { 
+  day: Date, 
+  mealType: string,
+  meals: any[],
+  onAddMeal: () => void,
+  onRemoveMeal: (id: number) => void
+}) => {
+  const createMealFromRecipe = useMutation({
+    mutationFn: (mealPlan: any) => 
+      apiRequest('POST', '/api/meal-plans', mealPlan),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/meal-plans/current'] });
+      toast({
+        title: 'Recipe added to meal plan',
+        description: 'Recipe has been added to your meal plan.',
+      });
+    },
+    onError: (error) => {
+      toast({
+        title: 'Error',
+        description: 'Failed to add recipe to meal plan.',
+        variant: 'destructive',
+      });
+    }
+  });
+  
+  const queryClient = useQueryClient();
+  
+  const [{ isOver }, drop] = useDrop(() => ({
+    accept: [ItemTypes.RECIPE, ItemTypes.MEAL],
+    drop: (item: any) => {
+      console.log('Drop detected', item);
+      
+      // Check if the dropped item is a recipe or a meal
+      if (item.recipe) {
+        // It's a recipe - directly create a meal plan entry
+        const recipe = item.recipe;
+        console.log('Recipe dropped:', recipe);
+        
+        // Create a new meal plan from the recipe
+        const newMeal = {
+          date: format(day, 'yyyy-MM-dd'),
+          mealType: mealType,
+          name: recipe.title || recipe.name,
+          description: recipe.description || recipe.instructions || "",
+          calories: recipe.calories || null,
+          protein: recipe.protein || null,
+          carbs: recipe.carbs || null,
+          fat: recipe.fat || null,
+          recipeId: recipe.id
+        };
+        
+        createMealFromRecipe.mutate(newMeal);
+      } else if (item.meal) {
+        // It's a meal being moved
+        console.log('Meal dropped:', item.meal);
+        // Implement meal movement logic if needed
+      }
+    },
+    collect: (monitor) => ({
+      isOver: !!monitor.isOver(),
+    }),
+  }));
+  
+  // Color coding for meal types
+  const getMealTypeStyle = () => {
+    switch(mealType) {
+      case 'breakfast':
+        return 'bg-green-50 hover:bg-green-100 dark:bg-green-900/20 dark:hover:bg-green-900/30';
+      case 'lunch':
+        return 'bg-orange-50 hover:bg-orange-100 dark:bg-orange-900/20 dark:hover:bg-orange-900/30';
+      case 'dinner':
+        return 'bg-purple-50 hover:bg-purple-100 dark:bg-purple-900/20 dark:hover:bg-purple-900/30';
+      case 'snack':
+        return 'bg-blue-50 hover:bg-blue-100 dark:bg-blue-900/20 dark:hover:bg-blue-900/30';
+      default:
+        return 'bg-gray-50 hover:bg-gray-100 dark:bg-gray-900/20 dark:hover:bg-gray-900/30';
+    }
+  };
+
+  return (
+    <div 
+      ref={drop} 
+      className={cn(
+        "p-2 rounded-lg transition-colors",
+        getMealTypeStyle(),
+        isOver ? "ring-2 ring-purple-400" : ""
+      )}
+    >
+      <div className="flex justify-between items-center mb-1">
+        <h3 className="text-sm font-medium capitalize">{mealType}</h3>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 w-7 p-0 rounded-full"
+          onClick={onAddMeal}
+        >
+          <Plus className="h-3.5 w-3.5" />
+        </Button>
+      </div>
+      
+      {meals.length > 0 ? (
+        <div className="space-y-2">
+          {meals.map((meal) => (
+            <MealItem 
+              key={meal.id} 
+              meal={meal} 
+              onRemove={onRemoveMeal} 
+            />
+          ))}
+        </div>
+      ) : (
+        <div className="text-xs text-gray-500 dark:text-gray-400 text-center p-3">
+          Drop a meal here
+        </div>
+      )}
+    </div>
+  );
+};
+
+// Day Card Component
+const DayCard = ({ 
+  day,
+  isToday,
+  meals,
+  calorieGoal,
+  onAddMeal,
+  onRemoveMeal
+}: { 
+  day: Date, 
+  isToday: boolean,
+  meals: any[],
+  calorieGoal: number,
+  onAddMeal: (day: Date, mealType: string) => void,
+  onRemoveMeal: (id: number) => void
+}) => {
+  const mealTypes = getMealTypes();
+  
+  // Calculate daily nutrition
+  const dailyNutrition = calculateTotalNutrition(meals || []);
+  const caloriePercentage = Math.min(Math.round(((dailyNutrition.calories || 0) / calorieGoal) * 100), 100);
+  
+  // Get meals for a specific type
+  const getMealsByType = (type: string) => {
+    if (!meals || !Array.isArray(meals)) {
+      console.log(`No meals array available for ${format(day, 'MM-dd')}`);
+      return [];
+    }
+    
+    const filteredMeals = meals.filter(meal => meal.mealType === type);
+    console.log(`Found ${filteredMeals.length} ${type} meals for ${format(day, 'MM-dd')}`);
+    return filteredMeals;
+  };
+
+  return (
+    <div 
+      className={cn(
+        "rounded-xl overflow-hidden shadow bg-white dark:bg-gray-950 border dark:border-gray-800",
+        isToday ? "ring-2 ring-purple-500" : ""
+      )}
+    >
+      <div className="bg-gradient-to-r from-purple-600 to-indigo-600 text-white px-4 py-2">
+        <div className="font-semibold">{format(day, 'EEEE')}</div>
+        <div className="text-xs opacity-90">{format(day, 'MMMM d')}</div>
+      </div>
+      
+      <div className="p-2 space-y-2">
+        {mealTypes.map((type) => (
+          <MealSlot
+            key={type}
+            day={day}
+            mealType={type}
+            meals={getMealsByType(type)}
+            onAddMeal={() => onAddMeal(day, type)}
+            onRemoveMeal={onRemoveMeal}
+          />
+        ))}
+      </div>
+      
+      <div className="p-2 border-t border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900">
+        <div className="flex justify-between text-xs mb-1">
+          <span>Calories</span>
+          <span>{dailyNutrition.calories} / {calorieGoal}</span>
+        </div>
+        <Progress 
+          value={caloriePercentage} 
+          className="h-1.5" 
+          indicatorClassName={caloriePercentage >= 100 ? "bg-red-500" : "bg-green-500"}
+        />
+      </div>
+    </div>
+  );
+};
+
+// NutritionSummary Component
+const NutritionSummary = ({ meals, calorieGoal }: { meals: any[], calorieGoal: number }) => {
+  const totalNutrition = calculateTotalNutrition(meals);
+  
+  // Prepare data for macro distribution chart
+  const chartData = {
+    labels: ['Protein', 'Carbs', 'Fat'],
+    datasets: [
+      {
+        data: [
+          totalNutrition.protein,
+          totalNutrition.carbs,
+          totalNutrition.fat
+        ],
+        backgroundColor: [
+          'rgba(54, 162, 235, 0.6)',
+          'rgba(75, 192, 192, 0.6)',
+          'rgba(255, 159, 64, 0.6)',
+        ],
+        borderColor: [
+          'rgba(54, 162, 235, 1)',
+          'rgba(75, 192, 192, 1)',
+          'rgba(255, 159, 64, 1)',
+        ],
+        borderWidth: 1,
+      },
+    ],
+  };
+
+  const chartOptions = {
+    responsive: true,
+    plugins: {
+      legend: {
+        position: 'bottom' as const,
+      },
+    },
+  };
+
+  // Calorie goal status
+  const calorieStatus = () => {
+    const percentage = (totalNutrition.calories / calorieGoal) * 100;
+    if (percentage > 110) return { color: 'text-red-500', message: 'Over goal' };
+    if (percentage >= 90) return { color: 'text-green-500', message: 'On track' };
+    return { color: 'text-yellow-500', message: 'Under goal' };
+  };
+
+  const status = calorieStatus();
+
+  return (
+    <div className="p-4 space-y-4">
+      <h3 className="font-semibold text-lg">Nutrition Summary</h3>
+      
+      <div className="space-y-3">
+        <div>
+          <div className="flex justify-between text-sm mb-1">
+            <span>Calories</span>
+            <span className={status.color}>
+              {totalNutrition.calories} / {calorieGoal} ({status.message})
+            </span>
+          </div>
+          <Progress 
+            value={(totalNutrition.calories / calorieGoal) * 100} 
+            className="h-2"
+            indicatorClassName={
+              totalNutrition.calories > calorieGoal ? "bg-red-500" : "bg-green-500"
+            }
+          />
+        </div>
+        
+        <div className="grid grid-cols-3 gap-2">
+          <div className="bg-blue-50 dark:bg-blue-900/20 p-2 rounded">
+            <div className="text-xs text-gray-500 dark:text-gray-400">Protein</div>
+            <div className="font-medium">{totalNutrition.protein}g</div>
+          </div>
+          <div className="bg-teal-50 dark:bg-teal-900/20 p-2 rounded">
+            <div className="text-xs text-gray-500 dark:text-gray-400">Carbs</div>
+            <div className="font-medium">{totalNutrition.carbs}g</div>
+          </div>
+          <div className="bg-orange-50 dark:bg-orange-900/20 p-2 rounded">
+            <div className="text-xs text-gray-500 dark:text-gray-400">Fat</div>
+            <div className="font-medium">{totalNutrition.fat}g</div>
+          </div>
+        </div>
+      </div>
+      
+      <div className="h-48">
+        <Pie data={chartData} options={chartOptions} />
+      </div>
+      
+      <div className="pt-4 border-t border-gray-200 dark:border-gray-800">
+        <h4 className="font-medium mb-2">Recommended Adjustments</h4>
+        <ul className="text-sm space-y-1">
+          {totalNutrition.protein < 50 && (
+            <li className="text-blue-600 dark:text-blue-400">• Add more protein sources</li>
+          )}
+          {totalNutrition.carbs > 300 && (
+            <li className="text-teal-600 dark:text-teal-400">• Reduce simple carbohydrates</li>
+          )}
+          {totalNutrition.fat > 70 && (
+            <li className="text-orange-600 dark:text-orange-400">• Consider lower fat options</li>
+          )}
+          {totalNutrition.calories < calorieGoal * 0.8 && (
+            <li className="text-yellow-600 dark:text-yellow-400">• Add more nutrient-dense foods</li>
+          )}
+        </ul>
+      </div>
+    </div>
+  );
+};
+
+// HealthBot Chat Widget
+const HealthBotWidget = ({ onClose }: { onClose: () => void }) => {
+  const [messages, setMessages] = useState<{ text: string, sender: 'user' | 'bot' }[]>([
+    { text: "Hi, I'm your Health Bot! Ask me for nutritional advice or meal suggestions.", sender: 'bot' }
+  ]);
+  const [message, setMessage] = useState('');
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
+  
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
+  
+  const handleSend = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!message.trim()) return;
+    
+    // Add user message
+    setMessages([...messages, { text: message, sender: 'user' }]);
+    const userMessage = message;
+    setMessage('');
+    
+    // Simulate bot response
+    setTimeout(() => {
+      let botResponse = "I'm processing your question. Check back soon for more insights!";
+      
+      // Simple response logic
+      if (userMessage.toLowerCase().includes('protein')) {
+        botResponse = "Good protein sources include chicken, fish, eggs, legumes, and tofu. Aim for 0.8-1g of protein per kg of body weight daily.";
+      } else if (userMessage.toLowerCase().includes('breakfast')) {
+        botResponse = "Healthy breakfast ideas: oatmeal with fruit, greek yogurt with nuts, or a vegetable omelet. These provide sustained energy and important nutrients.";
+      } else if (userMessage.toLowerCase().includes('calories')) {
+        botResponse = "Calorie needs vary by age, gender, weight, and activity level. Focus on nutrient-dense foods rather than just calorie counting.";
+      } else if (userMessage.toLowerCase().includes('meal')) {
+        botResponse = "I recommend balanced meals with vegetables covering half your plate, protein covering a quarter, and complex carbs covering the remaining quarter.";
+      }
+      
+      setMessages(prev => [...prev, { text: botResponse, sender: 'bot' }]);
+    }, 1000);
+  };
+  
+  return (
+    <div className="flex flex-col h-full">
+      <div className="flex justify-between items-center p-3 border-b">
+        <h3 className="font-semibold">NutriBot</h3>
+        <Button variant="ghost" size="sm" onClick={onClose}>
+          <X className="h-4 w-4" />
+        </Button>
+      </div>
+      
+      <div className="flex-1 p-3 overflow-y-auto">
+        <div className="space-y-3">
+          {messages.map((msg, index) => (
+            <div
+              key={index}
+              className={cn(
+                "max-w-[80%] rounded-lg p-3",
+                msg.sender === 'user' 
+                  ? "bg-purple-500 text-white ml-auto" 
+                  : "bg-gray-100 dark:bg-gray-800 mr-auto"
+              )}
+            >
+              {msg.text}
+            </div>
+          ))}
+          <div ref={messagesEndRef} />
+        </div>
+      </div>
+      
+      <form onSubmit={handleSend} className="border-t p-3">
+        <div className="flex gap-2">
+          <Input
+            value={message}
+            onChange={(e) => setMessage(e.target.value)}
+            placeholder="Ask about nutrition or meals..."
+            className="flex-1"
+          />
+          <Button type="submit" className="bg-purple-600 hover:bg-purple-700">Send</Button>
+        </div>
+      </form>
+    </div>
+  );
+};
+
+export default function MealPlannerEnhanced() {
+  const { user } = useAuth();
+  const queryClient = useQueryClient();
+  const [, setLocation] = useLocation();
+  const timeOfDay = getTimeOfDay();
+  
+  // State for date range and filtering
+  const [currentDate, setCurrentDate] = useState(new Date());
+  const [weekStartDate, setWeekStartDate] = useState(startOfWeek(currentDate, { weekStartsOn: 1 }));
+  const [activeMealType, setActiveMealType] = useState("all");
+  
+  // UI state
+  const [addMealDialogOpen, setAddMealDialogOpen] = useState(false);
+  const [suggestionsDialogOpen, setSuggestionsDialogOpen] = useState(false);
+  const [nutritionPanelOpen, setNutritionPanelOpen] = useState(false);
+  const [healthBotOpen, setHealthBotOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  
+  // Selected data for adding meals
+  const [selectedDay, setSelectedDay] = useState<Date | null>(null);
+  const [selectedMealType, setSelectedMealType] = useState("");
+  const [mealName, setMealName] = useState("");
+  const [mealCalories, setMealCalories] = useState("");
+  const [mealProtein, setMealProtein] = useState("");
+  const [mealCarbs, setMealCarbs] = useState("");
+  const [mealFat, setMealFat] = useState("");
+  const [mealDescription, setMealDescription] = useState("");
+  
+  // Query current meal plans
+  const { 
+    data: currentMealPlans = [], 
+    isLoading: isLoadingMealPlans,
+    refetch: refetchMealPlans
+  } = useQuery({
+    queryKey: ['/api/meal-plans/current'],
+    staleTime: 30000,
+  });
+  
+  // Query user preferences
+  const { 
+    data: userPreferences = {}, 
+  } = useQuery({
+    queryKey: ['/api/preferences'],
+    staleTime: 60000,
+  });
+  
+  // Query recipes
+  const {
+    data: recipes = [],
+    isLoading: isLoadingRecipes,
+    refetch: refetchRecipes
+  } = useQuery({
+    queryKey: ['/api/recipes', searchQuery],
+    enabled: false,
+  });
+  
+  // Query suggested recipes
+  const {
+    data: suggestedRecipes = [],
+    isLoading: isLoadingSuggestions,
+    refetch: refetchSuggestions
+  } = useQuery({
+    queryKey: ['/api/recipes/suggested'],
+    staleTime: 60000,
+  });
+  
+  // Mutation for creating a meal plan
+  const createMealPlanMutation = useMutation({
+    mutationFn: (mealPlan: any) => 
+      apiRequest('POST', '/api/meal-plans', mealPlan),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/meal-plans/current'] });
+      toast({
+        title: 'Meal added',
+        description: 'Your meal has been added to the plan.',
+      });
+      resetMealForm();
+      setAddMealDialogOpen(false);
+    },
+    onError: (error) => {
+      toast({
+        title: 'Error',
+        description: 'Failed to add meal. Please try again.',
+        variant: 'destructive',
+      });
+    }
+  });
+  
+  // Mutation for deleting a meal plan
+  const deleteMealPlanMutation = useMutation({
+    mutationFn: (id: number) => 
+      apiRequest('DELETE', `/api/meal-plans/${id}`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/meal-plans/current'] });
+      toast({
+        title: 'Meal removed',
+        description: 'Your meal has been removed from the plan.',
+      });
+    },
+    onError: (error) => {
+      toast({
+        title: 'Error',
+        description: 'Failed to remove meal. Please try again.',
+        variant: 'destructive',
+      });
+    }
+  });
+  
+  // Helper functions
+  const nextWeek = () => {
+    const newStartDate = addDays(weekStartDate, 7);
+    setWeekStartDate(newStartDate);
+  };
+  
+  const prevWeek = () => {
+    const newStartDate = addDays(weekStartDate, -7);
+    setWeekStartDate(newStartDate);
+  };
+  
+  const resetMealForm = () => {
+    setMealName("");
+    setMealDescription("");
+    setMealCalories("");
+    setMealProtein("");
+    setMealCarbs("");
+    setMealFat("");
+  };
+  
+  const handleAddMeal = (day: Date, mealType: string) => {
+    setSelectedDay(day);
+    setSelectedMealType(mealType);
+    setAddMealDialogOpen(true);
+  };
+  
+  const handleSubmitMeal = (e: React.FormEvent) => {
+    e.preventDefault();
+    
+    if (!selectedDay || !selectedMealType || !mealName) {
+      toast({
+        title: "Error",
+        description: "Please fill in all required fields.",
+        variant: "destructive",
+      });
+      return;
+    }
+    
+    const newMeal = {
+      date: format(selectedDay, 'yyyy-MM-dd'),
+      mealType: selectedMealType,
+      name: mealName,
+      description: mealDescription,
+      calories: mealCalories ? parseInt(mealCalories) : null,
+      protein: mealProtein ? parseInt(mealProtein) : null,
+      carbs: mealCarbs ? parseInt(mealCarbs) : null,
+      fat: mealFat ? parseInt(mealFat) : null,
+    };
+    
+    createMealPlanMutation.mutate(newMeal);
+  };
+  
+  const handleSearchRecipes = () => {
+    refetchRecipes();
+  };
+  
+  const handleSelectRecipe = (recipe: any) => {
+    setMealName(recipe.name);
+    setMealDescription(recipe.description || "");
+    setMealCalories(recipe.calories?.toString() || "");
+    setMealProtein(recipe.protein?.toString() || "");
+    setMealCarbs(recipe.carbs?.toString() || "");
+    setMealFat(recipe.fat?.toString() || "");
+    setSuggestionsDialogOpen(false);
+  };
+  
+  const handleGenerateGroceryList = () => {
+    // Navigate to the grocery list page
+    setLocation('/grocery-lists');
+    
+    // Show success notification
+    toast({
+      title: 'Grocery List Generated',
+      description: 'Your grocery list has been created based on your meal plan.',
+    });
+  };
+  
+  // Get meals for a specific day
+  const getMealsForDay = (day: Date, mealTypeFilter?: string) => {
+    const dateStr = format(day, 'yyyy-MM-dd');
+    
+    if (!Array.isArray(currentMealPlans)) {
+      console.log("Warning: currentMealPlans is not an array");
+      return [];
+    }
+    
+    const mealsForDay = currentMealPlans.filter((meal: any) => {
+      // First filter by date
+      const isMatchingDate = meal.date === dateStr;
+      
+      // Then filter by meal type if specified
+      if (mealTypeFilter && mealTypeFilter !== 'all') {
+        return isMatchingDate && meal.mealType === mealTypeFilter;
+      }
+      
+      return isMatchingDate;
+    });
+    
+    if (mealsForDay.length > 0) {
+      console.log(`Found ${mealsForDay.length} meals for ${dateStr}`);
+    }
+    
+    return mealsForDay;
+  };
+  
+  // Generate the week days
+  const weekDays = [];
+  for (let i = 0; i < 7; i++) {
+    const day = addDays(weekStartDate, i);
+    weekDays.push({
+      date: day,
+      isToday: isSameDay(day, new Date()),
+    });
+  }
+  
+  // Get all meals for the current week
+  const allWeekMeals = weekDays.flatMap(day => getMealsForDay(day.date));
+  
+  // Check if user has recipes available
+  const { data: userRecipes = [] } = useQuery({
+    queryKey: ["/api/recipes/my"],
+  });
+  
+  const hasRecipes = Array.isArray(userRecipes) && userRecipes.length > 0;
+
+  return (
+    <DndProvider backend={HTML5Backend}>
+      <Helmet>
+        <title>Meal Planner | NutriPlan</title>
+      </Helmet>
+      
+      <main className="container mx-auto px-4 py-6">
+        {/* Recipe Notification */}
+        {!hasRecipes && (
+          <div className="bg-amber-50 border-l-4 border-amber-500 p-4 mb-6 rounded-md shadow-sm dark:bg-amber-900/20 dark:border-amber-400">
+            <div className="flex items-start">
+              <div className="flex-shrink-0">
+                <svg className="h-5 w-5 text-amber-500" viewBox="0 0 20 20" fill="currentColor">
+                  <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                </svg>
+              </div>
+              <div className="ml-3">
+                <h3 className="text-sm font-medium text-amber-800 dark:text-amber-300">Recipe Required</h3>
+                <div className="mt-2 text-sm text-amber-700 dark:text-amber-200">
+                  <p>You need to create or generate recipes before planning meals. Please visit the <Link to="/recipes" className="font-medium underline">Recipes</Link> section first.</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+        
+        {/* Header and Controls */}
+        <div className="max-w-7xl mx-auto">
+          <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4">
+            <div>
+              <h1 className="text-3xl font-bold">
+                <span className="bg-gradient-to-r from-purple-600 to-blue-400 bg-clip-text text-transparent">
+                  Good {timeOfDay},
+                </span>{" "}
+                <span className="text-blue-400">
+                  {user?.firstName || 'Demo'}
+                </span>
+              </h1>
+              <p className="text-gray-600 dark:text-gray-400 mt-1">
+                Plan your meals and track your nutrition goals with ease
+              </p>
+            </div>
+            
+            <div className="flex flex-wrap gap-2">
+              <Button
+                variant="outline"
+                className="rounded-full"
+                onClick={() => setSuggestionsDialogOpen(true)}
+              >
+                <RefreshCw className="h-4 w-4 mr-2" />
+                Suggest Meals
+              </Button>
+              
+              <Button
+                variant="outline"
+                className="rounded-full"
+                onClick={() => setNutritionPanelOpen(true)}
+              >
+                <Flame className="h-4 w-4 mr-2" />
+                View Nutrition
+              </Button>
+              
+              <Button
+                variant="outline"
+                className="rounded-full"
+                onClick={handleGenerateGroceryList}
+              >
+                <ShoppingCart className="h-4 w-4 mr-2" />
+                Generate Grocery List
+              </Button>
+              
+              <Button
+                className="rounded-full bg-purple-600 hover:bg-purple-700"
+                onClick={() => {
+                  setSelectedDay(new Date());
+                  setSelectedMealType("breakfast");
+                  setAddMealDialogOpen(true);
+                }}
+              >
+                <Plus className="h-4 w-4 mr-2" />
+                Add Meal
+              </Button>
+            </div>
+          </div>
+          
+          <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
+            <div className="flex items-center space-x-2">
+              <Button
+                variant="outline"
+                size="icon"
+                className="rounded-full"
+                onClick={prevWeek}
+              >
+                <ChevronLeft className="h-4 w-4" />
+              </Button>
+              
+              <div className="inline-flex items-center rounded-full border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-950 px-4 py-1.5 text-sm">
+                {format(weekStartDate, 'MMM d')} - {format(addDays(weekStartDate, 6), 'MMM d, yyyy')}
+              </div>
+              
+              <Button
+                variant="outline"
+                size="icon"
+                className="rounded-full"
+                onClick={nextWeek}
+              >
+                <ChevronRight className="h-4 w-4" />
+              </Button>
+              
+              <Button
+                variant="outline"
+                className="rounded-full text-sm ml-2"
+                onClick={() => {
+                  const today = new Date();
+                  setCurrentDate(today);
+                  setWeekStartDate(startOfWeek(today, { weekStartsOn: 1 }));
+                }}
+              >
+                Today
+              </Button>
+            </div>
+            
+            <div className="flex overflow-x-auto space-x-2 pb-2">
+              <Button
+                variant={activeMealType === "all" ? "default" : "outline"}
+                className={cn(
+                  "rounded-full text-sm",
+                  activeMealType === "all" 
+                    ? "bg-purple-600 hover:bg-purple-700" 
+                    : "text-gray-700 dark:text-gray-300"
+                )}
+                onClick={() => setActiveMealType("all")}
+              >
+                All
+              </Button>
+              
+              {getMealTypes().map(type => (
+                <Button
+                  key={type}
+                  variant={activeMealType === type ? "default" : "outline"}
+                  className={cn(
+                    "rounded-full text-sm capitalize",
+                    activeMealType === type 
+                      ? "bg-purple-600 hover:bg-purple-700" 
+                      : "text-gray-700 dark:text-gray-300"
+                  )}
+                  onClick={() => setActiveMealType(type)}
+                >
+                  {type}
+                </Button>
+              ))}
+            </div>
+          </div>
+          
+          {/* Calendar Grid */}
+          {isLoadingMealPlans ? (
+            <div className="flex justify-center items-center p-12">
+              <div className="animate-spin mr-2 h-6 w-6 border-t-2 border-b-2 border-purple-600 rounded-full" />
+              <p>Loading your meal plan...</p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-7 gap-4 mb-8">
+              {weekDays.map(({ date, isToday }) => (
+                <DayCard
+                  key={date.toString()}
+                  day={date}
+                  isToday={isToday}
+                  meals={getMealsForDay(date)}
+                  calorieGoal={userPreferences?.calorieGoal || 2000}
+                  onAddMeal={handleAddMeal}
+                  onRemoveMeal={(id) => deleteMealPlanMutation.mutate(id)}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      </main>
+      
+      {/* Health Bot Floating Button */}
+      {!healthBotOpen && (
+        <div className="fixed bottom-4 right-4 z-50">
+          <Button
+            className="h-12 w-12 rounded-full bg-purple-600 hover:bg-purple-700 shadow-lg"
+            onClick={() => setHealthBotOpen(true)}
+          >
+            <MessageSquare className="h-5 w-5" />
+          </Button>
+        </div>
+      )}
+      
+      {/* Health Bot Sheet */}
+      <Sheet open={healthBotOpen} onOpenChange={setHealthBotOpen}>
+        <SheetContent className="w-[380px] sm:w-[540px] p-0">
+          <HealthBotWidget onClose={() => setHealthBotOpen(false)} />
+        </SheetContent>
+      </Sheet>
+      
+      {/* Nutrition Summary Sheet */}
+      <Sheet open={nutritionPanelOpen} onOpenChange={setNutritionPanelOpen}>
+        <SheetContent>
+          <SheetHeader className="text-left">
+            <SheetTitle>Nutrition Summary</SheetTitle>
+            <SheetDescription>
+              Weekly nutrition overview based on your meal plan
+            </SheetDescription>
+          </SheetHeader>
+          
+          <NutritionSummary 
+            meals={allWeekMeals} 
+            calorieGoal={userPreferences?.calorieGoal || 2000} 
+          />
+        </SheetContent>
+      </Sheet>
+      
+      {/* Add Meal Dialog */}
+      <Dialog open={addMealDialogOpen} onOpenChange={setAddMealDialogOpen}>
+        <DialogContent className="sm:max-w-[500px]">
+          <DialogHeader>
+            <DialogTitle>Add a Meal</DialogTitle>
+            <DialogDescription>
+              {selectedDay && selectedMealType && 
+                `Adding ${selectedMealType} for ${format(selectedDay, 'EEEE, MMM d, yyyy')}`
+              }
+            </DialogDescription>
+          </DialogHeader>
+          
+          <div className="py-4">
+            <Button
+              variant="outline"
+              className="w-full mb-4"
+              onClick={() => {
+                setSuggestionsDialogOpen(true);
+                setAddMealDialogOpen(false);
+              }}
+            >
+              <Search className="h-4 w-4 mr-2" />
+              Browse Recipes
+            </Button>
+            
+            <form onSubmit={handleSubmitMeal}>
+              <div className="grid gap-4">
+                <div className="grid gap-2">
+                  <Label htmlFor="mealName">Meal Name</Label>
+                  <Input
+                    id="mealName"
+                    value={mealName}
+                    onChange={(e) => setMealName(e.target.value)}
+                    placeholder="e.g. Grilled Chicken Salad"
+                    required
+                  />
+                </div>
+                
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="grid gap-2">
+                    <Label htmlFor="mealCalories">Calories</Label>
+                    <Input
+                      id="mealCalories"
+                      type="number"
+                      value={mealCalories}
+                      onChange={(e) => setMealCalories(e.target.value)}
+                      placeholder="kcal"
+                    />
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="mealProtein">Protein</Label>
+                    <Input
+                      id="mealProtein"
+                      type="number"
+                      value={mealProtein}
+                      onChange={(e) => setMealProtein(e.target.value)}
+                      placeholder="g"
+                    />
+                  </div>
+                </div>
+                
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="grid gap-2">
+                    <Label htmlFor="mealCarbs">Carbs</Label>
+                    <Input
+                      id="mealCarbs"
+                      type="number"
+                      value={mealCarbs}
+                      onChange={(e) => setMealCarbs(e.target.value)}
+                      placeholder="g"
+                    />
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="mealFat">Fat</Label>
+                    <Input
+                      id="mealFat"
+                      type="number"
+                      value={mealFat}
+                      onChange={(e) => setMealFat(e.target.value)}
+                      placeholder="g"
+                    />
+                  </div>
+                </div>
+                
+                <div className="grid gap-2">
+                  <Label htmlFor="mealDescription">Description (Optional)</Label>
+                  <Textarea
+                    id="mealDescription"
+                    value={mealDescription}
+                    onChange={(e) => setMealDescription(e.target.value)}
+                    placeholder="Add any notes about this meal..."
+                    rows={3}
+                  />
+                </div>
+                
+                <DialogFooter className="mt-4">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => setAddMealDialogOpen(false)}
+                  >
+                    Cancel
+                  </Button>
+                  <Button 
+                    type="submit"
+                    className="bg-purple-600 hover:bg-purple-700"
+                    disabled={!mealName || createMealPlanMutation.isPending}
+                  >
+                    {createMealPlanMutation.isPending ? (
+                      <>
+                        <div className="animate-spin mr-2 h-4 w-4 border-t-2 border-b-2 border-white rounded-full" />
+                        Adding...
+                      </>
+                    ) : "Add Meal"}
+                  </Button>
+                </DialogFooter>
+              </div>
+            </form>
+          </div>
+        </DialogContent>
+      </Dialog>
+      
+      {/* Recipe Suggestions Dialog */}
+      <Dialog open={suggestionsDialogOpen} onOpenChange={setSuggestionsDialogOpen}>
+        <DialogContent className="sm:max-w-[700px] lg:max-w-[900px] max-h-[80vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="text-2xl font-bold">Recipe Suggestions</DialogTitle>
+            <DialogDescription>
+              Find recipes or get AI-powered meal suggestions
+            </DialogDescription>
+          </DialogHeader>
+          
+          <Tabs defaultValue="search" className="py-4">
+            <TabsList className="grid grid-cols-2 mb-4">
+              <TabsTrigger value="search">Search Recipes</TabsTrigger>
+              <TabsTrigger value="suggest">Smart Suggestions</TabsTrigger>
+            </TabsList>
+            
+            <TabsContent value="search">
+              <div className="mb-4 flex gap-2">
+                <Input
+                  placeholder="Search recipes..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="flex-1"
+                />
+                <Button
+                  onClick={handleSearchRecipes}
+                  disabled={isLoadingRecipes}
+                  className="bg-purple-600 hover:bg-purple-700"
+                >
+                  {isLoadingRecipes ? (
+                    <div className="animate-spin h-4 w-4 border-t-2 border-b-2 border-white rounded-full" />
+                  ) : (
+                    <Search className="h-4 w-4" />
+                  )}
+                </Button>
+              </div>
+              
+              <div className="max-h-[500px] overflow-y-auto pr-1">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {Array.isArray(recipes) && recipes.length > 0 ? (
+                    recipes.map((recipe: any) => (
+                      <RecipeItem 
+                        key={recipe.id} 
+                        recipe={recipe} 
+                        onClick={() => handleSelectRecipe(recipe)} 
+                      />
+                    ))
+                  ) : (
+                    <div className="col-span-2 text-center py-8">
+                      <p className="text-gray-500 dark:text-gray-400 mb-2">
+                        {searchQuery ? 'No recipes found' : 'Search for recipes above'}
+                      </p>
+                      {searchQuery && (
+                        <Button 
+                          variant="outline" 
+                          onClick={() => setSearchQuery("")}
+                        >
+                          Clear search
+                        </Button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </TabsContent>
+            
+            <TabsContent value="suggest">
+              <div className="py-4">
+                <div className="flex flex-col space-y-4">
+                  <div className="flex justify-between items-center">
+                    <h3 className="text-lg font-medium">Personalized Suggestions</h3>
+                    <Button 
+                      variant="outline" 
+                      size="sm"
+                      onClick={() => refetchSuggestions()}
+                      disabled={isLoadingSuggestions}
+                    >
+                      <RefreshCw className={`h-3.5 w-3.5 mr-1 ${isLoadingSuggestions ? 'animate-spin' : ''}`} />
+                      Refresh
+                    </Button>
+                  </div>
+                  
+                  {isLoadingSuggestions ? (
+                    <div className="flex justify-center py-8">
+                      <div className="animate-spin h-8 w-8 border-t-2 border-b-2 border-primary rounded-full" />
+                    </div>
+                  ) : (
+                    <>
+                      {Array.isArray(suggestedRecipes) && suggestedRecipes.length > 0 ? (
+                        <div className="max-h-[500px] overflow-y-auto pr-1">
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            {suggestedRecipes.map((recipe: any) => (
+                              <RecipeItem 
+                                key={recipe.id} 
+                                recipe={recipe} 
+                                onClick={() => handleSelectRecipe(recipe)} 
+                              />
+                            ))}
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="text-center py-8 bg-gray-50 dark:bg-gray-800 rounded-lg">
+                          <p className="text-gray-500 dark:text-gray-400 mb-4">
+                            No personalized suggestions available yet
+                          </p>
+                          <Button 
+                            onClick={() => refetchSuggestions()}
+                            className="bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700"
+                          >
+                            Get Suggestions
+                          </Button>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+                
+                <div className="mt-6 flex justify-center">
+                  <Button 
+                    onClick={async () => {
+                      try {
+                        // First show a loading toast
+                        toast({
+                          title: 'Generating Suggestions',
+                          description: 'Creating personalized meal plan based on your preferences...',
+                        });
+                        
+                        // Calculate start and end date for a week
+                        const today = new Date();
+                        const startDate = format(today, 'yyyy-MM-dd');
+                        const endDate = format(addDays(today, 6), 'yyyy-MM-dd');
+                        
+                        // Call the meal plan generation API
+                        const response = await fetch('/api/meal-plans/generate', {
+                          method: 'POST',
+                          headers: {
+                            'Content-Type': 'application/json'
+                          },
+                          body: JSON.stringify({
+                            startDate,
+                            endDate
+                          })
+                        });
+                        
+                        if (response.ok) {
+                          // Get the actual response data
+                          const mealPlanData = await response.json();
+                          console.log("Generated meal plan data:", mealPlanData);
+                          
+                          // Invalidate queries to refresh the meal plan data
+                          queryClient.invalidateQueries({ queryKey: ['/api/meal-plans'] });
+                          queryClient.invalidateQueries({ queryKey: ['/api/meal-plans/current'] });
+                          
+                          // Force refetch right away
+                          await refetchMealPlans();
+                          
+                          toast({
+                            title: 'Meal Plan Ready',
+                            description: 'Your meal plan has been populated with personalized suggestions.',
+                            variant: 'default'
+                          });
+                          setSuggestionsDialogOpen(false);
+                        } else {
+                          const errorData = await response.json();
+                          throw new Error(errorData.message || 'Failed to generate meal plan');
+                        }
+                      } catch (error) {
+                        console.error('Error generating meal plan:', error);
+                        toast({
+                          title: 'Error',
+                          description: error instanceof Error ? error.message : 'Failed to generate meal plan',
+                          variant: 'destructive'
+                        });
+                      }
+                    }}
+                    className="bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700"
+                  >
+                    <CalendarPlus className="h-4 w-4 mr-2" />
+                    Generate Full Meal Plan
+                  </Button>
+                </div>
+              </div>
+              
+              <div className="bg-gray-50 dark:bg-gray-900 p-4 rounded-lg mt-4">
+                <h3 className="font-medium mb-2">Your Preferences</h3>
+                <div className="grid grid-cols-2 gap-4 text-sm">
+                  <div>
+                    <span className="text-gray-500 dark:text-gray-400">Dietary Preferences:</span>
+                    <p>{Array.isArray(userPreferences?.dietaryRestrictions) 
+                        ? userPreferences?.dietaryRestrictions.join(', ') 
+                        : 'None specified'}</p>
+                  </div>
+                  <div>
+                    <span className="text-gray-500 dark:text-gray-400">Daily Calorie Goal:</span>
+                    <p>{userPreferences?.calorieGoal || '2000'} kcal</p>
+                  </div>
+                  <div>
+                    <span className="text-gray-500 dark:text-gray-400">Fitness Goals:</span>
+                    <p>{Array.isArray(userPreferences?.goals) 
+                        ? userPreferences?.goals.join(', ') 
+                        : 'None specified'}</p>
+                  </div>
+                  <div>
+                    <span className="text-gray-500 dark:text-gray-400">Allergies:</span>
+                    <p>{Array.isArray(userPreferences?.allergies) 
+                        ? userPreferences?.allergies.join(', ') 
+                        : 'None specified'}</p>
+                  </div>
+                </div>
+                <p className="text-xs text-gray-500 mt-3">
+                  Update these in your <a href="/preferences" className="text-purple-600 hover:underline">Preferences</a> page
+                </p>
+              </div>
+            </TabsContent>
+          </Tabs>
+        </DialogContent>
+      </Dialog>
+    </DndProvider>
+  );
+}
